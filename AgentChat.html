@@ -1,0 +1,681 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AgentChat — MiniMax M2.5</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<!-- ════════════════════════════════════════════════
+     GitHub Actions is wali line ko replace karta hai:
+     __API_KEY__ → tumhari actual API key
+     Directly yahan mat likhna — Secret mein rakho!
+════════════════════════════════════════════════ -->
+<script>
+  window.__AGENTCHAT_KEY__ = "__API_KEY__";
+</script>
+
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body,#root{height:100%;overflow:hidden}
+  body{font-family:'Outfit',sans-serif;background:#07080f}
+  ::-webkit-scrollbar{width:4px;height:4px}
+  ::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-thumb{background:#1e2338;border-radius:4px}
+  ::-webkit-scrollbar-thumb:hover{background:#2a3050}
+  @keyframes tdot{0%,80%,100%{transform:scale(.6);opacity:.4}40%{transform:scale(1);opacity:1}}
+  @keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+  .msg-in{animation:fadeUp .22s ease}
+  input::placeholder,textarea::placeholder{color:#4a5370}
+  input,textarea,button{font-family:'Outfit',sans-serif}
+  textarea{resize:none}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useRef,useCallback,useMemo}=React;
+
+// ─── Theme ───────────────────────────────────────
+const C={
+  bg:'#07080f',side:'#0b0d16',surf:'#10131f',surfH:'#161a28',
+  bdr:'#1e2338',bdrL:'#252b40',
+  acc:'#00cfff',accG:'rgba(0,207,255,0.08)',accD:'rgba(0,207,255,0.28)',
+  txt:'#dde4f2',sub:'#8892a8',muted:'#4a5370',
+  err:'#ff5470',ok:'#00e676',warn:'#ffb74d',purple:'#c792ea',
+  code:'#090b14',kw:'#c792ea',str:'#c3e88d',cmt:'#546e7a',fn:'#82aaff',num:'#f78c6c',typ:'#89ddff',
+};
+
+// ─── Constants ────────────────────────────────────
+const MODELS=[
+  {id:'opencode/minimax-m2-5-free',name:'MiniMax M2.5 Free',badge:'FREE',color:'#00e676'},
+  {id:'opencode/minimax-m2-5',name:'MiniMax M2.5',badge:'PRO',color:'#00cfff'},
+  {id:'opencode/minimax-m2-7',name:'MiniMax M2.7',badge:'NEW',color:'#c792ea'},
+  {id:'gpt-4o',name:'GPT-4o',badge:'OAI',color:'#10a37f'},
+  {id:'claude-sonnet-4-5',name:'Claude Sonnet',badge:'ANT',color:'#d4a27f'},
+];
+const DEFAULT_API='https://opencode.ai/zen/v1';
+const DEFAULT_SYS=`You are an advanced agentic AI assistant. Help with code, debugging, analysis, GitHub, terminal, and web apps. Be concise, precise, and use markdown with code blocks.`;
+
+// ─── Injected key (from GitHub Secret via Actions) ─
+const INJECTED_KEY = (typeof window.__AGENTCHAT_KEY__ !== 'undefined' && window.__AGENTCHAT_KEY__ !== '__API_KEY__')
+  ? window.__AGENTCHAT_KEY__
+  : '';
+
+const genId=()=>Math.random().toString(36).slice(2,10);
+const fmtNum=n=>n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(1)+'K':String(n||0);
+const fmtTime=ts=>{const d=new Date(ts),now=new Date(),diff=now-d;if(diff<60000)return'Just now';if(diff<3600000)return Math.floor(diff/60000)+'m ago';if(diff<86400000)return d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});return d.toLocaleDateString([],{month:'short',day:'numeric'});};
+const escH=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+// ─── Syntax highlighter ───────────────────────────
+function hlCode(code,lang=''){
+  let h=escH(code);const l=lang.toLowerCase();
+  if(['js','javascript','ts','typescript','jsx','tsx'].includes(l)){
+    h=h.replace(/(\/\/[^\n]*)/g,`<span style="color:${C.cmt}">$1</span>`)
+      .replace(/(["'`])((?:[^\\]|\\.)*?)\1/g,`<span style="color:${C.str}">$&</span>`)
+      .replace(/\b(const|let|var|function|class|return|if|else|for|while|import|export|default|from|async|await|new|this|typeof|in|of|try|catch|throw|extends|super|switch|case|break|null|undefined|true|false)\b/g,`<span style="color:${C.kw}">$1</span>`)
+      .replace(/\b([A-Z][a-zA-Z0-9_]*)\b/g,`<span style="color:${C.typ}">$1</span>`)
+      .replace(/\b(\d+\.?\d*)\b/g,`<span style="color:${C.num}">$1</span>`)
+      .replace(/\b([a-z_$][a-zA-Z0-9_$]*)\s*(?=\()/g,`<span style="color:${C.fn}">$1</span>`);
+  }else if(['py','python'].includes(l)){
+    h=h.replace(/(#[^\n]*)/g,`<span style="color:${C.cmt}">$1</span>`)
+      .replace(/(["'])((?:[^\\]|\\.)*?)\1/g,`<span style="color:${C.str}">$&</span>`)
+      .replace(/\b(def|class|import|from|return|if|elif|else|for|while|in|not|and|or|True|False|None|with|as|try|except|raise|lambda|yield|pass|break|print|async|await)\b/g,`<span style="color:${C.kw}">$1</span>`)
+      .replace(/\b(\d+\.?\d*)\b/g,`<span style="color:${C.num}">$1</span>`);
+  }else if(['html','xml'].includes(l)){
+    h=h.replace(/(&lt;\/?[a-zA-Z][a-zA-Z0-9-]*)/g,`<span style="color:${C.fn}">$1</span>`)
+      .replace(/([a-zA-Z-]+)=/g,`<span style="color:${C.typ}">$1</span>=`)
+      .replace(/(&gt;)/g,`<span style="color:${C.fn}">$1</span>`);
+  }else if(['css','scss'].includes(l)){
+    h=h.replace(/(\/\*[\s\S]*?\*\/)/g,`<span style="color:${C.cmt}">$1</span>`)
+      .replace(/([.#][a-zA-Z_-][a-zA-Z0-9_-]*)/g,`<span style="color:${C.typ}">$1</span>`)
+      .replace(/([a-zA-Z-]+)\s*:/g,`<span style="color:${C.fn}">$1</span>:`)
+      .replace(/(#[0-9a-fA-F]{3,8})/g,`<span style="color:${C.str}">$1</span>`);
+  }else if(['bash','sh','shell'].includes(l)){
+    h=h.replace(/(#[^\n]*)/g,`<span style="color:${C.cmt}">$1</span>`)
+      .replace(/\b(echo|cd|ls|mkdir|rm|cp|mv|cat|grep|curl|wget|npm|pip|git|python|node|export|source)\b/g,`<span style="color:${C.kw}">$1</span>`)
+      .replace(/(["'])((?:[^\\]|\\.)*?)\1/g,`<span style="color:${C.str}">$&</span>`);
+  }
+  return h;
+}
+
+// ─── Markdown → HTML ─────────────────────────────
+let _cbIdx=0;
+function mdToHtml(text){
+  if(!text)return'';
+  const cbs=[],ics=[];
+  text=text.replace(/```(\w*)\n?([\s\S]*?)```/g,(_,lang,code)=>{const i=cbs.length;cbs.push({lang:lang.trim(),code:code.replace(/\n$/,'')});return`\x00CB${i}\x00`;});
+  text=text.replace(/`([^`\n]+)`/g,(_,c)=>{const i=ics.length;ics.push(c);return`\x00IC${i}\x00`;});
+  let h=escH(text);
+  h=h.replace(/^### (.+)$/gm,`<h3 style="color:${C.txt};font-size:13px;font-weight:700;margin:10px 0 4px">$1</h3>`);
+  h=h.replace(/^## (.+)$/gm,`<h2 style="color:${C.txt};font-size:15px;font-weight:700;margin:12px 0 5px">$1</h2>`);
+  h=h.replace(/^# (.+)$/gm,`<h1 style="color:${C.txt};font-size:18px;font-weight:800;margin:14px 0 6px">$1</h1>`);
+  h=h.replace(/\*\*\*(.+?)\*\*\*/g,'<strong><em>$1</em></strong>');
+  h=h.replace(/\*\*(.+?)\*\*/g,`<strong style="color:${C.txt};font-weight:600">$1</strong>`);
+  h=h.replace(/\*(.+?)\*/g,`<em style="color:${C.sub}">$1</em>`);
+  h=h.replace(/~~(.+?)~~/g,'<del>$1</del>');
+  h=h.replace(/\[(.+?)\]\((.+?)\)/g,`<a href="$2" target="_blank" style="color:${C.acc};text-decoration:underline">$1</a>`);
+  h=h.replace(/^&gt; (.+)$/gm,`<blockquote style="border-left:3px solid ${C.accD};padding:6px 12px;margin:8px 0;background:${C.accG};border-radius:0 6px 6px 0;color:${C.sub}">$1</blockquote>`);
+  h=h.replace(/^---$/gm,`<hr style="border:none;border-top:1px solid ${C.bdr};margin:12px 0">`);
+  h=h.replace(/^- (.+)$/gm,`<li style="margin:3px 0">$1</li>`);
+  h=h.replace(/((?:<li[^>]*>.*<\/li>\n?)+)/g,`<ul style="padding-left:20px;margin:6px 0;list-style:disc">$1</ul>`);
+  h=h.replace(/^\d+\. (.+)$/gm,'<oli>$1</oli>');
+  h=h.replace(/((?:<oli>.*<\/oli>\n?)+)/g,m=>`<ol style="padding-left:20px;margin:6px 0">${m.replace(/<oli>/g,'<li>').replace(/<\/oli>/g,'</li>')}</ol>`);
+  const lines=h.split('\n');const out=[];let para=[];
+  const flush=()=>{if(para.length){out.push(`<p style="margin:0 0 8px;line-height:1.65">${para.join('<br>')}</p>`);para=[];}};
+  for(const ln of lines){if(!ln.trim())flush();else if(/^<[hbpouil]/.test(ln.trim())){flush();out.push(ln);}else para.push(ln);}
+  flush();h=out.join('\n');
+  h=h.replace(/\x00IC(\d+)\x00/g,(_,i)=>`<code style="background:${C.code};border:1px solid ${C.bdr};padding:1px 6px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:.82em;color:${C.typ}">${escH(ics[+i])}</code>`);
+  h=h.replace(/\x00CB(\d+)\x00/g,(_,i)=>{
+    const{lang,code}=cbs[+i];const id='cb_'+(++_cbIdx);const hl=hlCode(code,lang);
+    return`<div style="margin:10px 0;border-radius:10px;overflow:hidden;border:1px solid ${C.bdr}"><div style="background:${C.surf};padding:7px 14px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid ${C.bdr}"><span style="color:${C.muted};font-size:10px;font-family:'JetBrains Mono',monospace;text-transform:uppercase">${lang||'code'}</span><button id="btn_${id}" onclick="(function(){const p=document.getElementById('${id}');navigator.clipboard.writeText(p.innerText).then(()=>{const b=document.getElementById('btn_${id}');b.textContent='✓ Copied';b.style.color='${C.ok}';setTimeout(()=>{b.textContent='Copy';b.style.color=''},1600)})})()" style="background:${C.surfH};border:1px solid ${C.bdr};color:${C.sub};padding:2px 10px;border-radius:5px;cursor:pointer;font-size:11px;font-family:Outfit,sans-serif;outline:none">Copy</button></div><pre id="${id}" style="background:${C.code};padding:14px 16px;overflow-x:auto;margin:0;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.6;color:${C.txt}"><code>${hl}</code></pre></div>`;
+  });
+  return h;
+}
+
+// ─── Icons ────────────────────────────────────────
+const ICONS={
+  send:'M22 2L11 13M22 2L15 22L11 13L2 9L22 2Z',plus:'M12 5v14M5 12h14',
+  settings:['M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z','M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z'],
+  trash:['M3 6h18','M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6','M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2'],
+  copy:['M20 9h-9a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2v-9a2 2 0 0 0-2-2Z','M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 0 2 2v1'],
+  regen:'M1 4v6h6M23 20v-6h-6M20.49 9A9 9 0 0 0 5.64 5.64L1 10M23 14l-4.64 4.36A9 9 0 0 1 3.51 15',
+  edit:['M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7','M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5Z'],
+  pin:['M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0Z','M12 10m-3 0a3 3 0 1 0 6 0a3 3 0 1 0 -6 0'],
+  pinoff:['M9.88 9.88a3 3 0 1 0 4.24 4.24','M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68','M2 2l20 20'],
+  search:['M21 21l-4.35-4.35','M17 11A6 6 0 1 1 5 11a6 6 0 0 1 12 0'],
+  mic:['M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3Z','M19 10v2a7 7 0 0 1-14 0v-2','M12 19v4','M8 23h8'],
+  micoff:['M1 1l22 22','M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6','M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23','M12 19v4','M8 23h8'],
+  attach:'M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48',
+  download:['M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4','M7 10l5 5 5-5','M12 15V3'],
+  x:'M18 6L6 18M6 6l12 12',
+  bot:['M12 2a4 4 0 0 1 4 4v1h1a3 3 0 0 1 3 3v7a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3V10a3 3 0 0 1 3-3h1V6a4 4 0 0 1 4-4Z','M9 14h.01','M15 14h.01'],
+  user:['M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2','M12 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z'],
+  github:'M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22',
+  globe:['M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20Z','M2 12h20','M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10Z'],
+  terminal:['M4 17L10 11 4 5','M12 19h8'],
+  monitor:['M20 3H4a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2Z','M8 21h8','M12 17v4'],
+  key:['M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4'],
+  folder:['M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2Z'],
+  file:['M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z','M13 2v7h7'],
+  zap:'M13 2L3 14h9l-1 8 10-12h-9l1-8Z',
+  check:'M20 6L9 17l-5-5',
+  chevL:'M15 18l-6-6 6-6',chevR:'M9 18l6-6-6-6',
+  moon:'M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z',
+  sun:['M12 1v2','M12 21v2','M4.22 4.22l1.42 1.42','M18.36 18.36l1.42 1.42','M1 12h2','M21 12h2','M4.22 19.78l1.42-1.42','M18.36 5.64l1.42-1.42','M12 17a5 5 0 1 0 0-10 5 5 0 0 0 0 10Z'],
+  msg:['M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z'],
+  stop:'M21 2H3v20h18V2Z',play:'M5 3l14 9-14 9V3Z',
+  alert:['M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z','M12 9v4','M12 17h.01'],
+  cpu:['M9 3H5a2 2 0 0 0-2 2v4','M15 3h4a2 2 0 0 1 2 2v4','M9 21H5a2 2 0 0 1-2-2v-4','M15 21h4a2 2 0 0 0 2-2v-4','M9 9h6v6H9Z'],
+  hash:['M4 9h16','M4 15h16','M10 3L8 21','M16 3l-2 18'],
+  link:['M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71','M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71'],
+  sliders:['M4 21v-7','M4 10V3','M12 21v-9','M12 8V3','M20 21v-5','M20 12V3','M1 14h6','M9 8h6','M17 16h6'],
+  save:['M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z','M17 21v-8H7v8','M7 3v5h8'],
+  shield:['M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z'],
+  info:['M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20Z','M12 8h.01','M12 12v4'],
+  clock:['M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20Z','M12 6v6l4 2'],
+};
+const I=({n,size=16,color=C.sub,style})=>{
+  const d=ICONS[n];
+  return(
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color}
+      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{flexShrink:0,...style}}>
+      {Array.isArray(d)?d.map((p,i)=><path key={i} d={p}/>):<path d={d}/>}
+    </svg>
+  );
+};
+
+// ─── UI helpers ──────────────────────────────────
+function IconBtn({onClick,n,title,active,size=16,color,style={}}){
+  const[h,setH]=useState(false);
+  return(
+    <button onClick={onClick} title={title}
+      onMouseEnter={()=>setH(true)} onMouseLeave={()=>setH(false)}
+      style={{background:active?C.accG:h?C.surfH:'transparent',border:`1px solid ${active?C.accD:'transparent'}`,cursor:'pointer',borderRadius:7,padding:6,color:color||(active?C.acc:h?C.txt:C.sub),display:'flex',alignItems:'center',justifyContent:'center',transition:'all .15s',flexShrink:0,outline:'none',...style}}>
+      <I n={n} size={size} color={color||(active?C.acc:h?C.txt:C.sub)}/>
+    </button>
+  );
+}
+function Badge({text,color=C.acc}){return<span style={{fontSize:9,fontWeight:700,letterSpacing:'.07em',background:`${color}18`,color,border:`1px solid ${color}40`,padding:'1px 6px',borderRadius:4,textTransform:'uppercase'}}>{text}</span>;}
+function TypingDots(){return<div style={{display:'flex',gap:5,alignItems:'center',padding:'4px 0'}}>{[0,1,2].map(i=><div key={i} style={{width:7,height:7,borderRadius:'50%',background:C.acc,animation:'tdot 1.3s ease-in-out infinite',animationDelay:`${i*.18}s`}}/>)}</div>;}
+function Toggle({value,onChange,label,sub}){
+  return(
+    <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'9px 0',borderBottom:`1px solid ${C.bdr}`}}>
+      <div><div style={{fontSize:13,color:C.sub}}>{label}</div>{sub&&<div style={{fontSize:10,color:C.muted,marginTop:1}}>{sub}</div>}</div>
+      <div onClick={()=>onChange(!value)} style={{width:42,height:24,borderRadius:12,background:value?C.acc:C.surf,border:`1px solid ${value?C.acc:C.bdr}`,cursor:'pointer',position:'relative',transition:'all .2s',flexShrink:0,marginLeft:12}}>
+        <div style={{width:18,height:18,borderRadius:'50%',background:value?'#000':'#fff',position:'absolute',top:2,left:value?22:2,transition:'left .2s',opacity:value?1:.5}}/>
+      </div>
+    </div>
+  );
+}
+const SL=p=><div style={{fontSize:10,fontWeight:700,color:C.muted,letterSpacing:'.1em',textTransform:'uppercase',margin:'16px 0 8px',...p.style}}>{p.children}</div>;
+const FL=p=><div style={{fontSize:12,color:C.sub,marginBottom:5}}>{p.children}</div>;
+
+// ─── Message Bubble ───────────────────────────────
+function MsgBubble({msg,onPin,onDel,onRegen,onEdit,isLast,showTs,fontSize}){
+  const[hov,setHov]=useState(false);const[copied,setCopied]=useState(false);
+  const isUser=msg.role==='user';
+  const doCopy=()=>{navigator.clipboard.writeText(msg.content);setCopied(true);setTimeout(()=>setCopied(false),1500);};
+  return(
+    <div className="msg-in" onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)}
+      style={{display:'flex',gap:12,padding:'14px 20px',background:isUser?C.surf:C.bg,borderBottom:`1px solid ${C.bdr}`,position:'relative',alignItems:'flex-start'}}>
+      <div style={{width:30,height:30,borderRadius:isUser?8:'50%',background:isUser?C.surfH:C.accG,border:`1px solid ${isUser?C.bdrL:C.accD}`,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,marginTop:2}}>
+        <I n={isUser?'user':'bot'} size={13} color={isUser?C.sub:C.acc}/>
+      </div>
+      <div style={{flex:1,minWidth:0}}>
+        <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:6,flexWrap:'wrap'}}>
+          <span style={{fontSize:12,fontWeight:600,color:isUser?C.sub:C.acc}}>{isUser?'You':'Agent'}</span>
+          {showTs&&<span style={{fontSize:11,color:C.muted}}>{fmtTime(msg.ts)}</span>}
+          {msg.pinned&&<I n="pin" size={11} color={C.warn}/>}
+          {msg.tokens>0&&<span style={{fontSize:10,color:C.muted,marginLeft:'auto'}}>{fmtNum(msg.tokens)} tokens</span>}
+        </div>
+        {msg.files&&msg.files.length>0&&(
+          <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:10}}>
+            {msg.files.map((f,i)=>(
+              <div key={i} style={{background:C.surf,border:`1px solid ${C.bdr}`,borderRadius:8,padding:'6px 10px',display:'flex',alignItems:'center',gap:6}}>
+                {f.type?.startsWith('image')?<img src={f.url} alt="" style={{height:60,borderRadius:4}}/>:<><I n="file" size={13} color={C.acc}/><span style={{fontSize:11,color:C.sub}}>{f.name}</span></>}
+              </div>
+            ))}
+          </div>
+        )}
+        <div style={{color:C.txt,fontSize:fontSize||13.5}} dangerouslySetInnerHTML={{__html:mdToHtml(msg.content)}}/>
+      </div>
+      {hov&&(
+        <div style={{position:'absolute',top:10,right:16,display:'flex',gap:2,background:C.surf,border:`1px solid ${C.bdr}`,borderRadius:8,padding:3,zIndex:10}}>
+          <IconBtn onClick={doCopy} n={copied?'check':'copy'} title="Copy" size={13} color={copied?C.ok:undefined}/>
+          {isUser&&<IconBtn onClick={()=>onEdit(msg)} n="edit" title="Edit & Resend" size={13}/>}
+          {!isUser&&isLast&&<IconBtn onClick={onRegen} n="regen" title="Regenerate" size={13}/>}
+          <IconBtn onClick={()=>onPin(msg.id)} n={msg.pinned?'pinoff':'pin'} title={msg.pinned?'Unpin':'Pin'} size={13}/>
+          <IconBtn onClick={()=>onDel(msg.id)} n="trash" title="Delete" size={13} color={C.err}/>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Sidebar ──────────────────────────────────────
+function ConvItem({conv,active,onSelect,onDel}){
+  const[h,setH]=useState(false);
+  return(
+    <div onMouseEnter={()=>setH(true)} onMouseLeave={()=>setH(false)} onClick={()=>onSelect(conv.id)}
+      style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'8px 10px',borderRadius:8,cursor:'pointer',marginBottom:2,background:active?C.accG:h?C.surfH:'transparent',border:`1px solid ${active?C.accD:'transparent'}`,transition:'all .12s'}}>
+      <div style={{flex:1,minWidth:0}}>
+        <div style={{fontSize:12.5,color:active?C.acc:C.txt,fontWeight:active?600:400,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',display:'flex',alignItems:'center',gap:5}}>
+          <I n="msg" size={10} color={active?C.acc:C.muted}/>{conv.title||'New Chat'}
+        </div>
+        <div style={{fontSize:10,color:C.muted,marginTop:2}}>{fmtTime(conv.updatedAt)} · {conv.messages.length} msgs</div>
+      </div>
+      {h&&<button onClick={e=>{e.stopPropagation();onDel(conv.id);}} style={{background:'none',border:'none',cursor:'pointer',padding:3,borderRadius:5,flexShrink:0}}><I n="trash" size={11} color={C.err}/></button>}
+    </div>
+  );
+}
+function Sidebar({open,convs,activeId,onSelect,onNew,onDel,onClose,search,setSearch,onSettings,theme,setTheme}){
+  if(!open)return null;
+  const filtered=convs.filter(c=>c.title.toLowerCase().includes(search.toLowerCase()));
+  return(
+    <div style={{width:258,flexShrink:0,background:C.side,borderRight:`1px solid ${C.bdr}`,display:'flex',flexDirection:'column',height:'100%'}}>
+      <div style={{padding:'14px 12px 10px',borderBottom:`1px solid ${C.bdr}`}}>
+        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:10}}>
+          <div style={{display:'flex',alignItems:'center',gap:8}}>
+            <div style={{width:28,height:28,borderRadius:8,background:C.accG,border:`1px solid ${C.accD}`,display:'flex',alignItems:'center',justifyContent:'center'}}><I n="bot" size={14} color={C.acc}/></div>
+            <span style={{fontWeight:800,fontSize:13,color:C.txt}}>AgentChat</span>
+          </div>
+          <IconBtn onClick={onClose} n="chevL" size={14} title="Collapse"/>
+        </div>
+        <button onClick={onNew} style={{width:'100%',background:C.accG,border:`1px solid ${C.accD}`,borderRadius:8,color:C.acc,padding:'8px 12px',cursor:'pointer',display:'flex',alignItems:'center',gap:7,fontSize:12,fontWeight:600,outline:'none',transition:'all .15s'}}
+          onMouseEnter={e=>e.currentTarget.style.background='rgba(0,207,255,.14)'}
+          onMouseLeave={e=>e.currentTarget.style.background=C.accG}>
+          <I n="plus" size={14} color={C.acc}/> New Chat
+        </button>
+      </div>
+      <div style={{padding:'8px 12px',borderBottom:`1px solid ${C.bdr}`}}>
+        <div style={{display:'flex',alignItems:'center',gap:7,background:C.surf,border:`1px solid ${C.bdr}`,borderRadius:8,padding:'6px 10px'}}>
+          <I n="search" size={13} color={C.muted}/>
+          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search chats..."
+            style={{background:'transparent',border:'none',outline:'none',color:C.txt,fontSize:12,flex:1,fontFamily:'Outfit,sans-serif'}}/>
+          {search&&<button onClick={()=>setSearch('')} style={{background:'none',border:'none',cursor:'pointer',padding:0}}><I n="x" size={12} color={C.muted}/></button>}
+        </div>
+      </div>
+      <div style={{flex:1,overflowY:'auto',padding:'6px 8px'}}>
+        {filtered.length===0&&<div style={{textAlign:'center',color:C.muted,fontSize:12,marginTop:30}}>{search?'No results':'No chats yet'}</div>}
+        {filtered.map(c=><ConvItem key={c.id} conv={c} active={c.id===activeId} onSelect={onSelect} onDel={onDel}/>)}
+      </div>
+      <div style={{padding:'10px 12px',borderTop:`1px solid ${C.bdr}`,display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+        <span style={{fontSize:11,color:C.muted}}>{convs.length} chats</span>
+        <div style={{display:'flex',gap:2}}>
+          <IconBtn onClick={()=>setTheme(t=>t==='dark'?'light':'dark')} n={theme==='dark'?'sun':'moon'} size={14} title="Toggle theme"/>
+          <IconBtn onClick={onSettings} n="settings" size={14} title="Settings"/>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Tool Panels ─────────────────────────────────
+function PanelShell({title,iconName,onClose,children}){
+  return(
+    <div style={{width:340,flexShrink:0,background:C.side,borderLeft:`1px solid ${C.bdr}`,display:'flex',flexDirection:'column',height:'100%'}}>
+      <div style={{padding:'14px 16px',borderBottom:`1px solid ${C.bdr}`,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+        <div style={{display:'flex',alignItems:'center',gap:8}}><I n={iconName} size={15} color={C.acc}/><span style={{fontWeight:700,fontSize:13,color:C.txt}}>{title}</span></div>
+        <IconBtn onClick={onClose} n="x" size={14}/>
+      </div>
+      <div style={{flex:1,overflowY:'auto',padding:14,display:'flex',flexDirection:'column',gap:10}}>{children}</div>
+    </div>
+  );
+}
+function GithubPanel({onClose}){
+  const[token,setToken]=useState('');const[repo,setRepo]=useState('');const[data,setData]=useState(null);const[files,setFiles]=useState([]);const[path,setPath]=useState([]);const[loading,setLoading]=useState(false);const[error,setError]=useState('');
+  const hdr=token?{Authorization:`token ${token}`}:{};
+  const slug=repo.replace('https://github.com/','').replace(/\/$/,'');
+  const[own,name]=[slug.split('/')[0],slug.split('/')[1]];
+  const fetchFiles=async p=>{const r=await fetch(`https://api.github.com/repos/${own}/${name}/contents/${p.join('/')}`,{headers:hdr});if(r.ok)setFiles(await r.json());};
+  const go=async()=>{if(!repo.trim())return;setLoading(true);setError('');setData(null);setFiles([]);setPath([]);try{const r=await fetch(`https://api.github.com/repos/${own}/${name}`,{headers:hdr});if(!r.ok)throw new Error(r.status===404?'Repo not found':'Error');setData(await r.json());await fetchFiles([]);}catch(e){setError(e.message);}setLoading(false);};
+  const openDir=async item=>{if(item.type!=='dir')return;const np=[...path,item.name];setPath(np);await fetchFiles(np);};
+  return(
+    <PanelShell title="GitHub Explorer" iconName="github" onClose={onClose}>
+      <div style={{display:'flex',alignItems:'center',gap:7,background:C.surf,border:`1px solid ${C.bdr}`,borderRadius:8,padding:'7px 10px'}}><I n="key" size={13} color={C.muted}/><input type="password" value={token} onChange={e=>setToken(e.target.value)} placeholder="Token (optional)" style={{background:'transparent',border:'none',outline:'none',color:C.txt,fontSize:12,flex:1,fontFamily:'Outfit,sans-serif'}}/></div>
+      <div style={{display:'flex',gap:6}}>
+        <div style={{flex:1,display:'flex',alignItems:'center',gap:7,background:C.surf,border:`1px solid ${C.bdr}`,borderRadius:8,padding:'7px 10px'}}><I n="github" size={13} color={C.muted}/><input value={repo} onChange={e=>setRepo(e.target.value)} onKeyDown={e=>e.key==='Enter'&&go()} placeholder="owner/repo" style={{background:'transparent',border:'none',outline:'none',color:C.txt,fontSize:12,flex:1,fontFamily:'Outfit,sans-serif'}}/></div>
+        <button onClick={go} disabled={loading} style={{background:C.accG,border:`1px solid ${C.accD}`,color:C.acc,borderRadius:8,padding:'7px 12px',cursor:'pointer',fontSize:12,fontWeight:600,display:'flex',alignItems:'center',gap:5,outline:'none'}}>{loading?<TypingDots/>:<><I n="play" size={13} color={C.acc}/>Go</>}</button>
+      </div>
+      {error&&<div style={{color:C.err,fontSize:12,padding:'8px 12px',background:`${C.err}15`,borderRadius:7}}>{error}</div>}
+      {data&&<div style={{background:C.surf,border:`1px solid ${C.bdr}`,borderRadius:10,padding:14}}><div style={{fontWeight:700,color:C.txt,fontSize:14,marginBottom:4}}>{data.full_name}</div>{data.description&&<div style={{color:C.sub,fontSize:12,marginBottom:8}}>{data.description}</div>}<div style={{display:'flex',gap:14,fontSize:11,color:C.muted}}><span>⭐ {fmtNum(data.stargazers_count)}</span><span>🍴 {fmtNum(data.forks_count)}</span>{data.language&&<span>📝 {data.language}</span>}</div></div>}
+      {files.length>0&&<div style={{background:C.code,border:`1px solid ${C.bdr}`,borderRadius:10,overflow:'hidden',flex:1}}>
+        <div style={{padding:'8px 12px',borderBottom:`1px solid ${C.bdr}`,display:'flex',alignItems:'center',gap:8,fontSize:11,color:C.muted}}>
+          {path.length>0&&<button onClick={async()=>{const np=path.slice(0,-1);setPath(np);await fetchFiles(np);}} style={{background:'none',border:'none',cursor:'pointer',color:C.acc,fontSize:11,padding:0}}>← Back</button>}
+          <I n="folder" size={12} color={C.muted}/><span>/{path.join('/')}</span>
+        </div>
+        <div style={{maxHeight:300,overflowY:'auto'}}>
+          {[...files].sort((a,b)=>a.type==='dir'?-1:1).map(f=>(
+            <div key={f.name} onClick={()=>openDir(f)} style={{padding:'7px 14px',borderBottom:`1px solid ${C.bdr}`,fontSize:12,color:f.type==='dir'?C.acc:C.txt,cursor:f.type==='dir'?'pointer':'default',display:'flex',gap:8,alignItems:'center'}}
+              onMouseEnter={e=>{if(f.type==='dir')e.currentTarget.style.background=C.surf;}} onMouseLeave={e=>e.currentTarget.style.background=''}>
+              <I n={f.type==='dir'?'folder':'file'} size={12} color={f.type==='dir'?C.acc:C.muted}/>{f.name}
+              {f.size>0&&<span style={{marginLeft:'auto',color:C.muted,fontSize:10}}>{fmtNum(f.size)}B</span>}
+            </div>
+          ))}
+        </div>
+      </div>}
+    </PanelShell>
+  );
+}
+function BrowserPanel({onClose}){
+  const[url,setUrl]=useState('');const[loaded,setLoaded]=useState('');
+  return(
+    <PanelShell title="Web Browser" iconName="globe" onClose={onClose}>
+      <div style={{display:'flex',gap:6}}>
+        <div style={{flex:1,display:'flex',alignItems:'center',gap:7,background:C.surf,border:`1px solid ${C.bdr}`,borderRadius:8,padding:'7px 10px'}}><I n="link" size={13} color={C.muted}/><input value={url} onChange={e=>setUrl(e.target.value)} onKeyDown={e=>e.key==='Enter'&&setLoaded(url.startsWith('http')?url:'https://'+url)} placeholder="https://example.com" style={{background:'transparent',border:'none',outline:'none',color:C.txt,fontSize:12,flex:1,fontFamily:'Outfit,sans-serif'}}/></div>
+        <button onClick={()=>setLoaded(url.startsWith('http')?url:'https://'+url)} style={{background:C.accG,border:`1px solid ${C.accD}`,color:C.acc,borderRadius:8,padding:'7px 12px',cursor:'pointer',fontSize:12,fontWeight:600,display:'flex',alignItems:'center',gap:4,outline:'none'}}>Go <I n="chevR" size={13} color={C.acc}/></button>
+      </div>
+      {!loaded?<div style={{color:C.muted,fontSize:12,textAlign:'center',marginTop:40}}>Enter URL and click Go</div>:(
+        <div style={{flex:1,background:C.code,borderRadius:10,overflow:'hidden',border:`1px solid ${C.bdr}`,display:'flex',flexDirection:'column'}}>
+          <div style={{background:C.surf,padding:'7px 12px',fontSize:11,color:C.muted,borderBottom:`1px solid ${C.bdr}`}}>🔒 {loaded}</div>
+          <iframe src={loaded} style={{flex:1,width:'100%',border:'none',minHeight:360,background:'#fff'}} sandbox="allow-scripts allow-same-origin allow-forms allow-popups" title="browser"/>
+        </div>
+      )}
+    </PanelShell>
+  );
+}
+function TerminalPanel({onClose}){
+  const[hist,setHist]=useState([{t:'sys',v:'AgentChat Terminal'},{t:'sys',v:"Type 'help' for commands"}]);
+  const[inp,setInp]=useState('');const[cmdH,setCmdH]=useState([]);const[hIdx,setHIdx]=useState(-1);const termRef=useRef();
+  const CMDS={help:()=>['Commands: help, clear, echo, date, ls, pwd, whoami, env, version'],clear:()=>{setHist([{t:'sys',v:'Cleared'}]);return[];},echo:a=>[a.join(' ')],date:()=>[new Date().toString()],ls:()=>['src/  public/  package.json  README.md'],pwd:()=>['/home/user/agentchat'],whoami:()=>['agent-user'],env:()=>['NODE_ENV=development','MODEL=minimax-m2-5-free'],version:()=>['AgentChat 1.0.0']};
+  const run=()=>{const cmd=inp.trim();if(!cmd)return;setCmdH(p=>[cmd,...p]);setHIdx(-1);const[n,...a]=cmd.split(' ');const out=CMDS[n]?CMDS[n](a):[`zsh: command not found: ${n}`];if(out.length>0)setHist(p=>[...p,{t:'cmd',v:`$ ${cmd}`},...out.map(v=>({t:'out',v}))]);setInp('');setTimeout(()=>{if(termRef.current)termRef.current.scrollTop=termRef.current.scrollHeight;},50);};
+  const onKey=e=>{if(e.key==='Enter'){run();return;}if(e.key==='ArrowUp'){const i=Math.min(hIdx+1,cmdH.length-1);setHIdx(i);setInp(cmdH[i]||'');}if(e.key==='ArrowDown'){const i=Math.max(hIdx-1,-1);setHIdx(i);setInp(i<0?'':cmdH[i]);}};
+  return(
+    <PanelShell title="Terminal" iconName="terminal" onClose={onClose}>
+      <div ref={termRef} style={{background:C.code,borderRadius:10,border:`1px solid ${C.bdr}`,padding:'12px 14px',flex:1,overflowY:'auto',minHeight:340,fontFamily:"'JetBrains Mono',monospace",fontSize:12,lineHeight:1.6}}>
+        {hist.map((h,i)=><div key={i} style={{color:h.t==='cmd'?C.acc:h.t==='sys'?C.muted:C.txt,marginBottom:1}}>{h.v}</div>)}
+        <div style={{display:'flex',alignItems:'center',gap:6,marginTop:6}}><span style={{color:C.ok}}>$</span><input value={inp} onChange={e=>setInp(e.target.value)} onKeyDown={onKey} placeholder="Enter command..." autoFocus style={{background:'transparent',border:'none',outline:'none',color:C.txt,fontFamily:"'JetBrains Mono',monospace",fontSize:12,flex:1}}/></div>
+      </div>
+    </PanelShell>
+  );
+}
+function PreviewPanel({onClose}){
+  const[code,setCode]=useState(`<!DOCTYPE html><html><head><style>body{font-family:sans-serif;background:#07080f;color:#dde4f2;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;flex-direction:column;gap:12px}h1{color:#00cfff}button{background:rgba(0,207,255,.1);border:1px solid rgba(0,207,255,.3);color:#00cfff;padding:10px 24px;border-radius:8px;cursor:pointer}</style></head><body><h1>🚀 Preview</h1><p>Paste HTML here</p><button onclick="alert('Works!')">Test</button></body></html>`);
+  const[src,setSrc]=useState('');
+  useEffect(()=>setSrc(code),[]);
+  return(
+    <PanelShell title="App Preview" iconName="monitor" onClose={onClose}>
+      <div style={{display:'flex',gap:6}}><button onClick={()=>setSrc(code)} style={{background:C.accG,border:`1px solid ${C.accD}`,color:C.acc,borderRadius:8,padding:'7px 12px',cursor:'pointer',fontSize:12,fontWeight:600,display:'flex',alignItems:'center',gap:5,outline:'none'}}><I n="play" size={13} color={C.acc}/> Run</button></div>
+      <textarea value={code} onChange={e=>setCode(e.target.value)} placeholder="Paste HTML/CSS/JS here..." style={{width:'100%',minHeight:140,background:C.code,border:`1px solid ${C.bdr}`,borderRadius:8,padding:12,color:C.txt,fontFamily:"'JetBrains Mono',monospace",fontSize:12,resize:'vertical',outline:'none',lineHeight:1.5}}/>
+      {src&&<div style={{border:`1px solid ${C.bdr}`,borderRadius:10,overflow:'hidden',flex:1}}><div style={{background:C.surf,padding:'6px 12px',fontSize:10,color:C.muted,borderBottom:`1px solid ${C.bdr}`,textTransform:'uppercase'}}>📱 Live Preview</div><iframe srcDoc={src} style={{width:'100%',height:240,border:'none'}} sandbox="allow-scripts" title="preview"/></div>}
+    </PanelShell>
+  );
+}
+
+// ─── Settings Modal ───────────────────────────────
+function SettingsModal({settings,onSave,onClose}){
+  const[s,setS]=useState({...settings});const up=(k,v)=>setS(p=>({...p,[k]:v}));const[tab,setTab]=useState('api');
+  const TABS=[{id:'api',n:'key',label:'API'},{id:'gen',n:'sliders',label:'Generation'},{id:'ui',n:'info',label:'Interface'},{id:'agent',n:'bot',label:'Agent'},{id:'adv',n:'cpu',label:'Advanced'}];
+  return(
+    <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,.8)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:1000,backdropFilter:'blur(6px)',padding:12}}>
+      <div style={{background:C.side,border:`1px solid ${C.bdrL}`,borderRadius:16,width:'min(520px,98vw)',maxHeight:'92vh',display:'flex',flexDirection:'column',boxShadow:'0 24px 64px rgba(0,0,0,.7)'}}>
+        <div style={{padding:'16px 20px',borderBottom:`1px solid ${C.bdr}`,display:'flex',alignItems:'center',justifyContent:'space-between',flexShrink:0}}>
+          <span style={{fontSize:16,fontWeight:800,color:C.txt}}>⚙️ Settings</span>
+          <IconBtn onClick={onClose} n="x" size={15}/>
+        </div>
+        <div style={{display:'flex',borderBottom:`1px solid ${C.bdr}`,flexShrink:0,overflowX:'auto'}}>
+          {TABS.map(t=><button key={t.id} onClick={()=>setTab(t.id)} style={{background:tab===t.id?C.surf:'transparent',border:'none',borderBottom:`2px solid ${tab===t.id?C.acc:'transparent'}`,color:tab===t.id?C.acc:C.sub,padding:'10px 14px',cursor:'pointer',fontSize:11.5,fontWeight:tab===t.id?700:400,display:'flex',alignItems:'center',gap:5,whiteSpace:'nowrap',outline:'none',transition:'all .15s'}}><I n={t.n} size={13} color={tab===t.id?C.acc:C.muted}/>{t.label}</button>)}
+        </div>
+        <div style={{flex:1,overflowY:'auto',padding:'16px 20px'}}>
+          {tab==='api'&&(<>
+            <SL>OpenCode Zen API Key</SL>
+            <div style={{display:'flex',alignItems:'center',gap:7,background:C.surf,border:`1px solid ${C.bdr}`,borderRadius:9,padding:'9px 12px',marginBottom:6}}>
+              <I n="key" size={13} color={C.muted}/>
+              <input type="password" value={s.apiKey} onChange={e=>up('apiKey',e.target.value)} placeholder="sk-... (opencode.ai → Zen → API Keys)" style={{background:'transparent',border:'none',outline:'none',color:C.txt,fontSize:12.5,flex:1,fontFamily:'Outfit,sans-serif'}}/>
+            </div>
+            {INJECTED_KEY&&<div style={{fontSize:11,color:C.ok,marginBottom:6,display:'flex',gap:5,alignItems:'center'}}><I n="shield" size={12} color={C.ok}/>Key injected from GitHub Secret ✓</div>}
+            <div style={{fontSize:11,color:C.muted,marginBottom:16}}>👉 <a href="https://opencode.ai" target="_blank" style={{color:C.acc}}>opencode.ai</a> → Login → Zen → Create API Key</div>
+            <SL>Custom API Base URL</SL>
+            <div style={{display:'flex',alignItems:'center',gap:7,background:C.surf,border:`1px solid ${C.bdr}`,borderRadius:9,padding:'9px 12px',marginBottom:4}}>
+              <I n="link" size={13} color={C.muted}/><input value={s.apiBase||DEFAULT_API} onChange={e=>up('apiBase',e.target.value)} style={{background:'transparent',border:'none',outline:'none',color:C.txt,fontSize:12,flex:1,fontFamily:'Outfit,sans-serif'}}/>
+            </div>
+            <button onClick={()=>up('apiBase',DEFAULT_API)} style={{background:'none',border:'none',color:C.muted,cursor:'pointer',fontSize:11,padding:0,marginBottom:16}}>Reset to default</button>
+            <SL>Model Selection</SL>
+            <div style={{display:'flex',flexDirection:'column',gap:7}}>
+              {MODELS.map(m=><div key={m.id} onClick={()=>up('model',m.id)} style={{background:s.model===m.id?C.accG:C.surf,border:`1px solid ${s.model===m.id?C.accD:C.bdr}`,borderRadius:9,padding:'10px 14px',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'space-between',transition:'all .15s'}}><span style={{fontWeight:700,fontSize:12.5,color:s.model===m.id?C.acc:C.txt}}>{m.name}</span><Badge text={m.badge} color={m.color}/></div>)}
+            </div>
+          </>)}
+          {tab==='gen'&&(<>
+            <SL>Temperature: {s.temperature}</SL>
+            <input type="range" min={0} max={2} step={0.1} value={s.temperature} onChange={e=>up('temperature',parseFloat(e.target.value))} style={{width:'100%',accentColor:C.acc,marginBottom:4}}/>
+            <div style={{display:'flex',justifyContent:'space-between',fontSize:10,color:C.muted,marginBottom:16}}><span>Precise (0)</span><span>Balanced (1)</span><span>Creative (2)</span></div>
+            <SL>Max Tokens: {fmtNum(s.maxTokens)}</SL>
+            <input type="range" min={256} max={8192} step={256} value={s.maxTokens} onChange={e=>up('maxTokens',parseInt(e.target.value))} style={{width:'100%',accentColor:C.acc,marginBottom:16}}/>
+            <SL>Options</SL>
+            <Toggle value={s.streamingMode!==false} onChange={v=>up('streamingMode',v)} label="Streaming Mode" sub="Real-time text generation"/>
+            <Toggle value={s.autoTitle!==false} onChange={v=>up('autoTitle',v)} label="Auto-title conversations"/>
+          </>)}
+          {tab==='ui'&&(<>
+            <SL>Theme</SL>
+            <div style={{display:'flex',gap:8,marginBottom:16}}>
+              {['dark','light'].map(t=><div key={t} onClick={()=>up('theme',t)} style={{flex:1,background:s.theme===t?C.accG:C.surf,border:`1px solid ${s.theme===t?C.accD:C.bdr}`,borderRadius:9,padding:'8px',cursor:'pointer',textAlign:'center',color:s.theme===t?C.acc:C.sub,fontSize:12,fontWeight:s.theme===t?700:400,display:'flex',alignItems:'center',justifyContent:'center',gap:5,transition:'all .15s'}}><I n={t==='dark'?'moon':'sun'} size={13} color={s.theme===t?C.acc:C.muted}/>{t==='dark'?'Dark':'Light'}</div>)}
+            </div>
+            <SL>Font Size: {s.fontSize||13.5}px</SL>
+            <input type="range" min={11} max={17} step={0.5} value={s.fontSize||13.5} onChange={e=>up('fontSize',parseFloat(e.target.value))} style={{width:'100%',accentColor:C.acc,marginBottom:16}}/>
+            <SL>Display</SL>
+            <Toggle value={s.showTs!==false} onChange={v=>up('showTs',v)} label="Show timestamps"/>
+            <Toggle value={s.showTokens!==false} onChange={v=>up('showTokens',v)} label="Show token count"/>
+            <Toggle value={s.compactMode||false} onChange={v=>up('compactMode',v)} label="Compact mode"/>
+          </>)}
+          {tab==='agent'&&(<>
+            <SL>System Prompt</SL>
+            <textarea value={s.systemPrompt} onChange={e=>up('systemPrompt',e.target.value)} rows={7} style={{width:'100%',background:C.surf,border:`1px solid ${C.bdr}`,borderRadius:9,padding:12,color:C.txt,fontSize:12,resize:'vertical',outline:'none',lineHeight:1.55,marginBottom:8,boxSizing:'border-box',fontFamily:'Outfit,sans-serif'}}/>
+            <button onClick={()=>up('systemPrompt',DEFAULT_SYS)} style={{background:'none',border:'none',color:C.muted,cursor:'pointer',fontSize:11,padding:0,marginBottom:16}}>Reset to default</button>
+            <SL>Input</SL>
+            <Toggle value={s.sendOnEnter!==false} onChange={v=>up('sendOnEnter',v)} label="Enter = Send"/>
+            <Toggle value={s.voiceInput!==false} onChange={v=>up('voiceInput',v)} label="Voice input button"/>
+            <SL>Tool Panels</SL>
+            <Toggle value={s.showGithub!==false} onChange={v=>up('showGithub',v)} label="GitHub Explorer"/>
+            <Toggle value={s.showBrowser!==false} onChange={v=>up('showBrowser',v)} label="Web Browser"/>
+            <Toggle value={s.showTerminal!==false} onChange={v=>up('showTerminal',v)} label="Terminal"/>
+            <Toggle value={s.showPreview!==false} onChange={v=>up('showPreview',v)} label="App Preview"/>
+          </>)}
+          {tab==='adv'&&(<>
+            <SL>Storage</SL>
+            <FL>Max conversations: {s.maxConvs||60}</FL>
+            <input type="range" min={10} max={200} step={10} value={s.maxConvs||60} onChange={e=>up('maxConvs',parseInt(e.target.value))} style={{width:'100%',accentColor:C.acc,marginBottom:16}}/>
+            <SL>Data</SL>
+            <div style={{display:'flex',gap:8}}>
+              <button onClick={()=>{if(confirm('Clear all?')){localStorage.clear();window.location.reload();}}} style={{flex:1,background:`${C.err}15`,border:`1px solid ${C.err}40`,borderRadius:9,padding:10,color:C.err,cursor:'pointer',fontSize:12,fontWeight:600,outline:'none'}}>🗑 Clear All</button>
+              <button onClick={()=>{const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([localStorage.getItem('agentchat_v2')||'{}'],{type:'application/json'}));a.download='backup.json';a.click();}} style={{flex:1,background:C.accG,border:`1px solid ${C.accD}`,borderRadius:9,padding:10,color:C.acc,cursor:'pointer',fontSize:12,fontWeight:600,outline:'none'}}>💾 Backup</button>
+            </div>
+            <SL style={{marginTop:16}}>About</SL>
+            <div style={{background:C.surf,border:`1px solid ${C.bdr}`,borderRadius:9,padding:12,fontSize:11,color:C.muted,lineHeight:1.7}}>
+              <div>AgentChat v1.0.0</div><div>MiniMax M2.5 via OpenCode Zen</div><div>205K context · Free tier</div>
+              {INJECTED_KEY&&<div style={{color:C.ok,marginTop:6}}>✓ API Key via GitHub Secret</div>}
+            </div>
+          </>)}
+        </div>
+        <div style={{padding:'14px 20px',borderTop:`1px solid ${C.bdr}`,flexShrink:0,display:'flex',gap:10}}>
+          <button onClick={onClose} style={{flex:1,background:C.surf,border:`1px solid ${C.bdr}`,borderRadius:9,padding:11,color:C.sub,cursor:'pointer',fontSize:13,fontWeight:600,outline:'none'}}>Cancel</button>
+          <button onClick={()=>{onSave(s);onClose();}} style={{flex:2,background:C.accG,border:`1px solid ${C.accD}`,borderRadius:9,padding:11,color:C.acc,cursor:'pointer',fontSize:13,fontWeight:700,outline:'none',boxShadow:`0 0 14px ${C.accD}`}}>✓ Save</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Welcome ─────────────────────────────────────
+function Welcome({onNew,hasKey,onSettings,model,onTool}){
+  const CARDS=[{n:'cpu',t:'Code & Debug',s:'Write, review, fix code',a:onNew},{n:'github',t:'GitHub',s:'Explore repos',a:()=>onTool('github')},{n:'globe',t:'Browser',s:'Visit any website',a:()=>onTool('browser')},{n:'terminal',t:'Terminal',s:'Shell commands',a:()=>onTool('terminal')},{n:'monitor',t:'App Preview',s:'Build HTML apps',a:()=>onTool('preview')},{n:'file',t:'File Analysis',s:'Upload & analyze',a:onNew}];
+  return(
+    <div style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:'40px 24px',gap:24,textAlign:'center'}}>
+      <div style={{width:76,height:76,borderRadius:22,background:C.accG,border:`2px solid ${C.accD}`,display:'flex',alignItems:'center',justifyContent:'center',boxShadow:`0 0 50px ${C.accD}`}}><I n="bot" size={34} color={C.acc}/></div>
+      <div>
+        <h1 style={{fontSize:28,fontWeight:800,color:C.txt,letterSpacing:'-.02em',margin:0}}>AgentChat</h1>
+        <p style={{margin:'8px 0 0',color:C.sub,fontSize:14}}>Powered by <strong style={{color:C.acc}}>{model.name}</strong></p>
+        {INJECTED_KEY&&<p style={{margin:'4px 0 0',color:C.ok,fontSize:12,display:'flex',alignItems:'center',justifyContent:'center',gap:5}}><I n="shield" size={12} color={C.ok}/>API Key secured via GitHub Secret</p>}
+      </div>
+      {!hasKey&&(<div style={{background:`${C.warn}12`,border:`1px solid ${C.warn}40`,borderRadius:12,padding:'14px 18px',maxWidth:400,display:'flex',alignItems:'center',gap:12}}><I n="alert" size={18} color={C.warn}/><div style={{textAlign:'left',flex:1}}><div style={{fontSize:13,fontWeight:700,color:C.warn}}>API Key Required</div><div style={{fontSize:11,color:C.sub,marginTop:2}}>Settings → API tab mein daalo</div></div><button onClick={onSettings} style={{background:C.accG,border:`1px solid ${C.accD}`,borderRadius:8,padding:'7px 14px',color:C.acc,cursor:'pointer',fontSize:12,fontWeight:700,flexShrink:0,outline:'none'}}>Add Key</button></div>)}
+      <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:10,maxWidth:520,width:'100%'}}>
+        {CARDS.map((c,i)=><div key={i} onClick={c.a} style={{background:C.surf,border:`1px solid ${C.bdr}`,borderRadius:12,padding:'14px 12px',cursor:'pointer',transition:'all .15s',textAlign:'left'}} onMouseEnter={e=>{e.currentTarget.style.borderColor=C.accD;e.currentTarget.style.background=C.accG;}} onMouseLeave={e=>{e.currentTarget.style.borderColor=C.bdr;e.currentTarget.style.background=C.surf;}}><I n={c.n} size={18} color={C.acc}/><div style={{fontWeight:700,fontSize:12.5,color:C.txt,marginTop:8}}>{c.t}</div><div style={{fontSize:10.5,color:C.muted,marginTop:3,lineHeight:1.4}}>{c.s}</div></div>)}
+      </div>
+      <button onClick={onNew} style={{background:C.acc,border:'none',borderRadius:11,padding:'12px 30px',color:'#000',fontWeight:800,fontSize:14,cursor:'pointer',display:'flex',alignItems:'center',gap:8,boxShadow:`0 0 24px ${C.accD}`,outline:'none',transition:'all .15s'}} onMouseEnter={e=>e.currentTarget.style.transform='scale(1.04)'} onMouseLeave={e=>e.currentTarget.style.transform='scale(1)'}><I n="plus" size={16} color="#000"/> Start New Chat</button>
+    </div>
+  );
+}
+
+// ─── Main App ────────────────────────────────────
+function App(){
+  const[convs,setConvs]=useState([]);const[activeId,setActiveId]=useState(null);const[input,setInput]=useState('');const[loading,setLoading]=useState(false);const[streamTxt,setStreamTxt]=useState('');const[sideOpen,setSideOpen]=useState(true);const[settOpen,setSettOpen]=useState(false);const[panel,setPanel]=useState(null);const[search,setSearch]=useState('');const[msgSearch,setMsgSearch]=useState('');const[showMsgSearch,setShowMsgSearch]=useState(false);const[files,setFiles]=useState([]);const[recording,setRecording]=useState(false);const[tokenUsage,setTokenUsage]=useState({total:0,prompt:0,comp:0});const[theme,setTheme]=useState('dark');
+  const[settings,setSettings]=useState({
+    apiKey:INJECTED_KEY,apiBase:DEFAULT_API,
+    model:'opencode/minimax-m2-5-free',systemPrompt:DEFAULT_SYS,
+    temperature:0.7,maxTokens:4096,streamingMode:true,autoTitle:true,
+    sendOnEnter:true,voiceInput:true,showTs:true,showTokens:true,
+    compactMode:false,showGithub:true,showBrowser:true,showTerminal:true,
+    showPreview:true,maxConvs:60,fontSize:13.5,
+  });
+
+  const chatRef=useRef();const inputRef=useRef();const fileRef=useRef();const abortRef=useRef();const recogRef=useRef();
+  const activeConv=convs.find(c=>c.id===activeId);const messages=activeConv?.messages||[];
+  const currentModel=MODELS.find(m=>m.id===settings.model)||MODELS[0];
+  const scrollBot=useCallback(()=>{setTimeout(()=>{if(chatRef.current)chatRef.current.scrollTop=chatRef.current.scrollHeight;},60);},[]);
+
+  useEffect(()=>{try{const d=JSON.parse(localStorage.getItem('agentchat_v2')||'{}');if(d.convs){setConvs(d.convs);if(d.convs.length>0)setActiveId(d.convs[0].id);}if(d.settings)setSettings(s=>({...s,...d.settings,apiKey:INJECTED_KEY||d.settings.apiKey||s.apiKey}));}catch(e){};},[]);
+  useEffect(()=>{try{localStorage.setItem('agentchat_v2',JSON.stringify({convs:convs.slice(0,settings.maxConvs||60),settings}));}catch(e){};},[convs,settings]);
+
+  const newChat=useCallback(()=>{const c={id:genId(),title:'New Chat',messages:[],createdAt:Date.now(),updatedAt:Date.now()};setConvs(p=>[c,...p]);setActiveId(c.id);setInput('');setFiles([]);},[]);
+  const delConv=useCallback(id=>{setConvs(p=>p.filter(c=>c.id!==id));if(id===activeId)setActiveId(convs.filter(c=>c.id!==id)[0]?.id||null);},[activeId,convs]);
+  const updConv=useCallback((id,fn)=>setConvs(p=>p.map(c=>c.id===id?{...c,...fn(c),updatedAt:Date.now()}:c)),[]);
+
+  const send=useCallback(async(ov)=>{
+    const txt=(ov!==undefined?ov:input).trim();
+    if(!txt&&files.length===0)return;
+    if(!settings.apiKey){setSettOpen(true);return;}
+    let cid=activeId;
+    if(!cid){const c={id:genId(),title:'New Chat',messages:[],createdAt:Date.now(),updatedAt:Date.now()};setConvs(p=>[c,...p]);setActiveId(c.id);cid=c.id;await new Promise(r=>setTimeout(r,20));}
+    const userMsg={id:genId(),role:'user',content:txt,files:files.map(f=>({name:f.name,type:f.type,url:f.url,text:f.text})),ts:Date.now()};
+    setConvs(p=>p.map(c=>c.id===cid?{...c,messages:[...c.messages,userMsg],title:c.title==='New Chat'?(txt.slice(0,38)||'File upload'):c.title,updatedAt:Date.now()}:c));
+    setInput('');setFiles([]);setLoading(true);setStreamTxt('');scrollBot();
+    const conv=convs.find(c=>c.id===cid)||{messages:[]};
+    const allMsgs=[...conv.messages,userMsg];
+    const apiMsgs=[{role:'system',content:settings.systemPrompt},...allMsgs.map(m=>({role:m.role,content:m.files?.length?[{type:'text',text:m.content||''},...m.files.filter(f=>f.text).map(f=>({type:'text',text:`[File: ${f.name}]\n${f.text}`}))]:m.content}))];
+    abortRef.current=new AbortController();let full='',inTok=0,outTok=0;
+    try{
+      const base=(settings.apiBase||DEFAULT_API).replace(/\/$/,'');
+      const ep=base+'/chat/completions';
+      const resp=await fetch(ep,{method:'POST',signal:abortRef.current.signal,headers:{'Content-Type':'application/json','Authorization':`Bearer ${settings.apiKey}`},body:JSON.stringify({model:settings.model,messages:apiMsgs,stream:!!settings.streamingMode,temperature:settings.temperature,max_tokens:settings.maxTokens})});
+      if(!resp.ok){const e=await resp.json().catch(()=>({error:{message:`HTTP ${resp.status}`}}));throw new Error(e.error?.message||`HTTP ${resp.status}`);}
+      if(settings.streamingMode){
+        const reader=resp.body.getReader();const dec=new TextDecoder();
+        while(true){const{done,value}=await reader.read();if(done)break;const chunk=dec.decode(value,{stream:true});for(const line of chunk.split('\n')){const l=line.trim();if(!l.startsWith('data:'))continue;const data=l.slice(5).trim();if(data==='[DONE]')continue;try{const j=JSON.parse(data);const delta=j.choices?.[0]?.delta?.content||'';if(delta){full+=delta;setStreamTxt(full);scrollBot();}if(j.usage){inTok=j.usage.prompt_tokens||0;outTok=j.usage.completion_tokens||0;}}catch(_){}}}
+      }else{const j=await resp.json();full=j.choices?.[0]?.message?.content||'';inTok=j.usage?.prompt_tokens||0;outTok=j.usage?.completion_tokens||0;}
+    }catch(e){
+      if(e.name==='AbortError')full=full||'*(Stopped)*';
+      else if(/fetch|network|cors|failed/i.test(e.message))full=`❌ **Connection Error**\n\n**${e.message}**\n\n**Solutions:**\n- File ko server se open karo (python -m http.server 8080)\n- Settings → API Base URL check karo`;
+      else full=`❌ **Error:** ${e.message}`;
+    }
+    setStreamTxt('');
+    const aiMsg={id:genId(),role:'assistant',content:full,ts:Date.now(),tokens:inTok+outTok};
+    setConvs(p=>p.map(c=>c.id===cid?{...c,messages:[...c.messages,aiMsg],updatedAt:Date.now()}:c));
+    setTokenUsage(p=>({total:p.total+inTok+outTok,prompt:p.prompt+inTok,comp:p.comp+outTok}));
+    setLoading(false);scrollBot();
+  },[input,files,activeId,convs,settings,scrollBot]);
+
+  const stop=()=>abortRef.current?.abort();
+  const regen=useCallback(()=>{if(!activeConv)return;const msgs=activeConv.messages;const lastAI=[...msgs].reverse().find(m=>m.role==='assistant');if(!lastAI)return;updConv(activeId,c=>({...c,messages:c.messages.filter(m=>m.id!==lastAI.id)}));setTimeout(()=>{const lu=[...msgs].filter(m=>m.role==='user').pop();if(lu)send(lu.content);},50);},[activeConv,activeId,updConv,send]);
+  const pinMsg=id=>updConv(activeId,c=>({...c,messages:c.messages.map(m=>m.id===id?{...m,pinned:!m.pinned}:m)}));
+  const delMsg=id=>updConv(activeId,c=>({...c,messages:c.messages.filter(m=>m.id!==id)}));
+  const handleEdit=msg=>{if(msg.role!=='user')return;setInput(msg.content);delMsg(msg.id);setTimeout(()=>inputRef.current?.focus(),100);};
+
+  const handleFiles=async fl=>{for(const f of fl){const isImg=f.type.startsWith('image/');const isTxt=f.type.startsWith('text/')||/\.(js|ts|py|json|md|css|html|jsx|tsx|rb|sh|yaml|toml|env|txt|csv|sql)$/i.test(f.name);if(isImg){const url=await new Promise(r=>{const fr=new FileReader();fr.onload=e=>r(e.target.result);fr.readAsDataURL(f);});setFiles(p=>[...p,{name:f.name,type:f.type,url}]);}else if(isTxt||f.size<500000){const text=await f.text().catch(()=>'[Could not read]');setFiles(p=>[...p,{name:f.name,type:f.type,text:text.slice(0,25000)}]);}else setFiles(p=>[...p,{name:f.name,type:f.type,text:`[File: ${fmtNum(f.size)} bytes]`}]);}};
+
+  const toggleVoice=()=>{if(recording){recogRef.current?.stop();setRecording(false);return;}const SR=window.SpeechRecognition||window.webkitSpeechRecognition;if(!SR){alert('Voice not supported');return;}const r=new SR();r.lang='en-US';r.continuous=false;r.interimResults=true;r.onresult=e=>{setInput(Array.from(e.results).map(r=>r[0].transcript).join(''));};r.onend=()=>setRecording(false);r.start();recogRef.current=r;setRecording(true);};
+
+  const exportChat=fmt=>{if(!activeConv)return;let c='';if(fmt==='md'){c=`# ${activeConv.title}\n\n`;activeConv.messages.forEach(m=>{c+=`### ${m.role==='user'?'You':'Agent'}\n${m.content}\n\n---\n\n`;});}else c=JSON.stringify(activeConv,null,2);const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([c],{type:'text/plain'}));a.download=`${activeConv.title.replace(/\s+/g,'_')}.${fmt}`;a.click();};
+
+  const visibleMsgs=msgSearch?messages.filter(m=>m.content.toLowerCase().includes(msgSearch.toLowerCase())):messages;
+  const onKeyDown=e=>{if(settings.sendOnEnter!==false&&e.key==='Enter'&&!e.shiftKey&&!loading){e.preventDefault();send();}};
+  const autoResize=e=>{e.target.style.height='auto';e.target.style.height=Math.min(e.target.scrollHeight,200)+'px';};
+
+  const tools=[settings.showGithub!==false&&{id:'github',n:'github'},settings.showBrowser!==false&&{id:'browser',n:'globe'},settings.showTerminal!==false&&{id:'terminal',n:'terminal'},settings.showPreview!==false&&{id:'preview',n:'monitor'}].filter(Boolean);
+
+  return(
+    <div style={{display:'flex',height:'100vh',background:C.bg,color:C.txt,fontFamily:"'Outfit',sans-serif",overflow:'hidden'}}>
+      <Sidebar open={sideOpen} convs={convs} activeId={activeId} onSelect={id=>{setActiveId(id);setInput('');setFiles([]);}} onNew={newChat} onDel={delConv} onClose={()=>setSideOpen(false)} search={search} setSearch={setSearch} onSettings={()=>setSettOpen(true)} theme={theme} setTheme={setTheme}/>
+      <div style={{flex:1,display:'flex',flexDirection:'column',minWidth:0,height:'100%'}}>
+        {/* Header */}
+        <div style={{height:52,padding:'0 14px',borderBottom:`1px solid ${C.bdr}`,display:'flex',alignItems:'center',gap:8,flexShrink:0,background:C.side}}>
+          {!sideOpen&&<IconBtn onClick={()=>setSideOpen(true)} n="chevR" size={15} title="Open sidebar"/>}
+          <div style={{fontWeight:700,fontSize:13,color:C.txt,flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{activeConv?.title||'AgentChat'}</div>
+          <div style={{display:'flex',alignItems:'center',gap:5,background:C.accG,border:`1px solid ${C.accD}`,borderRadius:8,padding:'4px 10px',flexShrink:0}}>
+            <I n="cpu" size={11} color={C.acc}/>
+            <span style={{fontSize:11,color:C.acc,fontWeight:600,whiteSpace:'nowrap'}}>{currentModel.name}</span>
+            <Badge text={currentModel.badge} color={currentModel.color}/>
+            {INJECTED_KEY&&<I n="shield" size={11} color={C.ok} style={{marginLeft:2}} title="Key from GitHub Secret"/>}
+          </div>
+          {settings.showTokens!==false&&tokenUsage.total>0&&<div style={{display:'flex',alignItems:'center',gap:4,fontSize:11,color:C.muted}}><I n="hash" size={10} color={C.muted}/>{fmtNum(tokenUsage.total)}</div>}
+          <div style={{display:'flex',gap:1,flexShrink:0}}>
+            <IconBtn onClick={()=>setShowMsgSearch(s=>!s)} n="search" size={14} active={showMsgSearch} title="Search messages"/>
+            <IconBtn onClick={()=>exportChat('md')} n="download" size={14} title="Export Markdown"/>
+            {tools.map(t=><IconBtn key={t.id} onClick={()=>setPanel(p=>p===t.id?null:t.id)} n={t.n} size={14} active={panel===t.id} title={t.id}/>)}
+            <IconBtn onClick={()=>setSettOpen(true)} n="settings" size={14} title="Settings"/>
+          </div>
+        </div>
+
+        {showMsgSearch&&<div style={{padding:'8px 16px',borderBottom:`1px solid ${C.bdr}`,display:'flex',gap:8,alignItems:'center',background:C.side}}>
+          <I n="search" size={13} color={C.muted}/>
+          <input autoFocus value={msgSearch} onChange={e=>setMsgSearch(e.target.value)} placeholder="Search messages..." style={{background:'transparent',border:'none',outline:'none',color:C.txt,fontSize:13,flex:1,fontFamily:'Outfit,sans-serif'}}/>
+          {msgSearch&&<span style={{fontSize:11,color:C.muted}}>{visibleMsgs.length} found</span>}
+          <button onClick={()=>{setShowMsgSearch(false);setMsgSearch('');}} style={{background:'none',border:'none',cursor:'pointer',padding:0}}><I n="x" size={13} color={C.muted}/></button>
+        </div>}
+
+        <div ref={chatRef} style={{flex:1,overflowY:'auto',display:'flex',flexDirection:'column'}}>
+          {messages.length===0?<Welcome onNew={newChat} hasKey={!!settings.apiKey} onSettings={()=>setSettOpen(true)} model={currentModel} onTool={setPanel}/>:(
+            <>
+              {visibleMsgs.map((msg,i)=><MsgBubble key={msg.id} msg={msg} onPin={pinMsg} onDel={delMsg} onRegen={regen} onEdit={handleEdit} isLast={i===visibleMsgs.length-1} showTs={settings.showTs!==false} fontSize={settings.fontSize}/>)}
+              {loading&&streamTxt===''&&<div style={{display:'flex',gap:12,padding:'14px 20px',alignItems:'flex-start'}}><div style={{width:30,height:30,borderRadius:'50%',background:C.accG,border:`1px solid ${C.accD}`,display:'flex',alignItems:'center',justifyContent:'center'}}><I n="bot" size={13} color={C.acc}/></div><div style={{paddingTop:6}}><TypingDots/></div></div>}
+              {streamTxt&&<div className="msg-in" style={{display:'flex',gap:12,padding:'14px 20px',borderBottom:`1px solid ${C.bdr}`,alignItems:'flex-start'}}>
+                <div style={{width:30,height:30,borderRadius:'50%',background:C.accG,border:`1px solid ${C.accD}`,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}><I n="bot" size={13} color={C.acc}/></div>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontSize:12,fontWeight:600,color:C.acc,marginBottom:6,display:'flex',gap:6,alignItems:'center'}}>Agent <span style={{width:7,height:7,borderRadius:'50%',background:C.acc,display:'inline-block',animation:'pulse 1s infinite'}}/></div>
+                  <div style={{color:C.txt,fontSize:settings.fontSize||13.5}} dangerouslySetInnerHTML={{__html:mdToHtml(streamTxt)}}/>
+                </div>
+              </div>}
+            </>
+          )}
+        </div>
+
+        <div style={{padding:'12px 16px 14px',borderTop:`1px solid ${C.bdr}`,background:C.side,flexShrink:0}}>
+          {files.length>0&&<div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:10}}>{files.map((f,i)=><div key={i} style={{background:C.surf,border:`1px solid ${C.bdr}`,borderRadius:9,padding:'6px 10px',display:'flex',alignItems:'center',gap:6,maxWidth:220}}>{f.type?.startsWith('image')?<img src={f.url} alt="" style={{height:44,borderRadius:4}}/>:<I n="file" size={13} color={C.acc}/>}<span style={{fontSize:11,color:C.sub,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{f.name}</span><button onClick={()=>setFiles(p=>p.filter((_,j)=>j!==i))} style={{background:'none',border:'none',cursor:'pointer',padding:0,marginLeft:'auto',flexShrink:0}}><I n="x" size={11} color={C.err}/></button></div>)}</div>}
+          <div style={{background:C.surf,border:`1px solid ${loading?C.accD:C.bdr}`,borderRadius:13,padding:'10px 12px',display:'flex',flexDirection:'column',gap:8,transition:'border-color .2s',boxShadow:loading?`0 0 0 1px ${C.accD}`:'none'}}>
+            <textarea ref={inputRef} value={input} onChange={e=>{setInput(e.target.value);autoResize(e);}} onKeyDown={onKeyDown} placeholder={loading?'Agent is thinking...':'Message the agent...'} disabled={loading} rows={1} style={{background:'transparent',border:'none',outline:'none',color:loading?C.muted:C.txt,fontSize:settings.fontSize||13.5,lineHeight:1.6,fontFamily:"'Outfit',sans-serif",width:'100%',maxHeight:200,overflowY:'auto',minHeight:24}}/>
+            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+              <div style={{display:'flex',gap:2}}>
+                <input ref={fileRef} type="file" multiple accept="*/*" style={{display:'none'}} onChange={e=>{handleFiles(Array.from(e.target.files||[]));if(fileRef.current)fileRef.current.value='';}}/>
+                <IconBtn onClick={()=>fileRef.current?.click()} n="attach" size={15} title="Attach files"/>
+                {settings.voiceInput!==false&&<IconBtn onClick={toggleVoice} n={recording?'micoff':'mic'} size={15} color={recording?C.err:undefined} active={recording} title="Voice"/>}
+                <IconBtn onClick={()=>{setInput('');setFiles([]);}} n="x" size={15} title="Clear"/>
+              </div>
+              <div style={{display:'flex',alignItems:'center',gap:8}}>
+                {recording&&<span style={{fontSize:11,color:C.err,display:'flex',alignItems:'center',gap:4}}><span style={{width:6,height:6,borderRadius:'50%',background:C.err,display:'inline-block',animation:'pulse 1s infinite'}}/>Listening...</span>}
+                {input.length>0&&<span style={{fontSize:11,color:C.muted}}>{input.length}</span>}
+                {loading?<button onClick={stop} style={{background:`${C.err}18`,border:`1px solid ${C.err}50`,color:C.err,borderRadius:9,padding:'7px 14px',cursor:'pointer',fontSize:12,fontWeight:700,display:'flex',alignItems:'center',gap:5,outline:'none'}}><I n="stop" size={12} color={C.err}/> Stop</button>:
+                <button onClick={()=>send()} disabled={!input.trim()&&files.length===0} style={{background:(input.trim()||files.length>0)?C.acc:C.surfH,border:'none',borderRadius:9,padding:'7px 18px',color:(input.trim()||files.length>0)?'#000':C.muted,cursor:(input.trim()||files.length>0)?'pointer':'not-allowed',fontSize:12.5,fontWeight:800,display:'flex',alignItems:'center',gap:5,transition:'all .15s',outline:'none',boxShadow:(input.trim()||files.length>0)?`0 0 18px ${C.accD}`:'none'}}><I n="send" size={13} color={(input.trim()||files.length>0)?'#000':C.muted}/> Send</button>}
+              </div>
+            </div>
+          </div>
+          <div style={{fontSize:10,color:C.muted,textAlign:'center',marginTop:6}}>{currentModel.name} via OpenCode Zen · Enter=Send · Shift+Enter=Newline</div>
+        </div>
+      </div>
+
+      {panel==='github'&&<GithubPanel onClose={()=>setPanel(null)}/>}
+      {panel==='browser'&&<BrowserPanel onClose={()=>setPanel(null)}/>}
+      {panel==='terminal'&&<TerminalPanel onClose={()=>setPanel(null)}/>}
+      {panel==='preview'&&<PreviewPanel onClose={()=>setPanel(null)}/>}
+      {settOpen&&<SettingsModal settings={settings} onSave={setSettings} onClose={()=>setSettOpen(false)}/>}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
