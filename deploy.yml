@@ -1,0 +1,51 @@
+name: Deploy AgentChat to GitHub Pages
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:  # Manual trigger button bhi milega
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    runs-on: ubuntu-latest
+
+    steps:
+      # â”€â”€ Step 1: Code checkout â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # â”€â”€ Step 2: API Key inject karo â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      # GitHub Secret se OPENCODE_API_KEY uthata hai
+      # aur __API_KEY__ placeholder ko replace karta hai
+      - name: Inject API Key from Secret
+        run: |
+          sed -i 's/__API_KEY__/${{ secrets.OPENCODE_API_KEY }}/g' AgentChat.html
+          echo "âœ… API Key injected successfully"
+
+      # â”€â”€ Step 3: Pages setup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      - name: Setup GitHub Pages
+        uses: actions/configure-pages@v4
+
+      # â”€â”€ Step 4: Files upload karo â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      - name: Upload to Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: '.'   # Root folder upload hogi
+
+      # â”€â”€ Step 5: Deploy! â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
